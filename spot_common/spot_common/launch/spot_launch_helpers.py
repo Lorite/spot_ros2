@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 import yaml
 from launch import LaunchContext, Substitution
 from launch.actions import DeclareLaunchArgument
-from launch.substitutions import PathJoinSubstitution
+from launch.utilities import normalize_to_list_of_substitutions, perform_substitutions
 from synchros2.launch.actions import DeclareBooleanLaunchArgument
 
 from spot_wrapper.wrapper import SpotWrapper
@@ -26,6 +26,23 @@ _CAMERAS_USED: Literal["cameras_used"] = "cameras_used"
 _GRIPPERLESS: Literal["gripperless"] = "gripperless"
 _SPOT_NAME: Literal["spot_name"] = "spot_name"
 _FRAME_PREFIX: Literal["frame_prefix"] = "frame_prefix"
+
+
+class _SuffixSubstitution(Substitution):
+    """Substitution that performs ``inner`` and appends a literal ``suffix``."""
+
+    def __init__(self, inner: Substitution, suffix: str) -> None:
+        super().__init__()
+        self._inner = inner
+        self._suffix = suffix
+
+    def describe(self) -> str:
+        return f"{self._inner.describe()}{self._suffix}"
+
+    def perform(self, context: LaunchContext) -> str:
+        return perform_substitutions(
+            context, normalize_to_list_of_substitutions(self._inner)
+        ) + self._suffix
 
 
 IMAGE_PUBLISHER_ARGS = [
@@ -312,7 +329,13 @@ def get_name_and_prefix(ros_params: Dict[str, Any]) -> Tuple[Union[str, Substitu
     tf_prefix: Optional[Union[str, Substitution]] = ros_params[_FRAME_PREFIX] if _FRAME_PREFIX in ros_params else None
     if tf_prefix is None:
         if isinstance(spot_name, Substitution):
-            tf_prefix = PathJoinSubstitution([spot_name, ""])
+            # PathJoinSubstitution([spot_name, ""]) drops the trailing empty
+            # component (pathlib.PurePath behavior), producing "spot_name"
+            # without the trailing slash. That mismatches the slash-prefixed
+            # joint names published on /joint_states and breaks the URDF TF
+            # broadcast. Wrap in a single Substitution that preserves the slash
+            # (IncludeLaunchDescription.launch_arguments rejects raw lists).
+            tf_prefix = _SuffixSubstitution(spot_name, "/")
         elif isinstance(spot_name, str) and spot_name:
             tf_prefix = spot_name + "/"
         else:
