@@ -1,6 +1,7 @@
 // Copyright (c) 2023-2024 Boston Dynamics AI Institute LLC. All rights reserved.
 
 #include <rclcpp/node.hpp>
+#include <rclcpp/qos.hpp>
 #include <spot_driver/api/spot_image_sources.hpp>
 #include <spot_driver/images/images_middleware_handle.hpp>
 #include <spot_driver/interfaces/rclcpp_logger_interface.hpp>
@@ -9,7 +10,22 @@
 #include <spot_driver/interfaces/rclcpp_wall_timer_interface.hpp>
 
 namespace {
-constexpr auto kPublisherHistoryDepth = 10;
+// Camera image / compressed / camera_info publishers use the REP-2003 sensor_data
+// profile (KEEP_LAST(5) + BEST_EFFORT + VOLATILE) instead of the driver-wide
+// makePublisherQoS() default (RELIABLE + TRANSIENT_LOCAL). The reliable +
+// transient_local combination — appropriate for command and state topics —
+// backpressures the writer queue whenever a downstream subscriber falls behind
+// (slow AprilTag rectifier, bag recorder, RViz over a noisy link, ...). With
+// large frames (e.g. 1280x720 RGB at 15 Hz ≈ 41 MB/s) the queue saturates fast
+// and the raw image stream stalls to 0 Hz while small messages like
+// camera_info keep flowing on their own queue, silently breaking every
+// downstream consumer. sensor_data is the standard QoS for camera streams and
+// drops samples under load instead of stalling the producer. Late joiners no
+// longer get the last cached frame, but at 15 Hz the next one arrives within
+// ~67 ms.
+rclcpp::QoS makeImagePublisherQoS() {
+  return rclcpp::SensorDataQoS();
+}
 
 }  // namespace
 
@@ -34,16 +50,16 @@ void ImagesMiddlewareHandle::createPublishers(const std::set<ImageSource>& image
     if (image_source.type == SpotImageType::RGB && publish_compressed_images) {
       compressed_image_publishers_.try_emplace(
           image_topic_name, node_->create_publisher<sensor_msgs::msg::CompressedImage>(
-                                image_topic_name + "/compressed", makePublisherQoS(kPublisherHistoryDepth)));
+                                image_topic_name + "/compressed", makeImagePublisherQoS()));
     }
     if (uncompress_images || (image_source.type != SpotImageType::RGB)) {
       image_publishers_.try_emplace(
           image_topic_name, node_->create_publisher<sensor_msgs::msg::Image>(image_topic_name + "/image",
-                                                                             makePublisherQoS(kPublisherHistoryDepth)));
+                                                                             makeImagePublisherQoS()));
     }
     info_publishers_.try_emplace(image_topic_name,
                                  node_->create_publisher<sensor_msgs::msg::CameraInfo>(
-                                     image_topic_name + "/camera_info", makePublisherQoS(kPublisherHistoryDepth)));
+                                     image_topic_name + "/camera_info", makeImagePublisherQoS()));
   }
 }
 
